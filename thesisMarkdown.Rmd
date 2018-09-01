@@ -1,0 +1,1335 @@
+---
+title: "Using preferences to predict and explain human-decision making in game theory"
+author: "J. van Buren"
+date: "16 July 2018"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+### Load packages
+All packages that are used in this script are described and loaded in. The used functions of the packages are noted in brackets (). For more information see the corresponding help files. 
+
+* _QuantPsych_: used for extracting the standardized coefficients (lm.beta)
+* _dplyr_: used for general data transformation (select, mutate, rename, inner_join)
+* _glmnet_: used for conducting the lasso method (cv.glmnet, glmnet)
+* _gam_: used for constructing a generalized additive model containing a smoothing spline (gam)
+* _gbm_: used for conducting a gradient  boosting machine (gbm)
+* _caret_: used for fitting and training the gbm (trainControl, expand.grid, train)
+* _car_: used for plotting the residuals (residualPlot, redidualsPlot)
+* _bestglm_: used for finding the best subset selection of a logistic regresion (bestglm)
+```{r Load packages, message = FALSE, warning = FALSE}
+library(QuantPsyc) 
+library(dplyr)
+library(glmnet)
+library(gbm)
+library(gam)
+# library(caret): loaded in later to avoid conflicts
+library(car)
+library(bestglm)
+```
+
+### thesisFunctions.R file
+Other packages and functions are loaded in via "thesisFunctions.R" file. These packages are used in the created functions and described below. The used functions of the package are noted in brackets (). For more information see the corresponding help files.
+
+* _psych_: used for descriptive statistics, a correlation test and for measuring Cronbach's alpha (describe, corr.test, alpha)
+* _glmnet_: Used for conducting the lasso method 
+and for plotting the shrinkage of the coefficients (glmnet)
+* _corrplot_: used for a visualisation of the correlations (corrplot)
+* _leaps_: used for conducting a best subset selection method of a linear regression model (regsubsets)
+* _splines_: used for conducting a smoothing spline (smooth.spline)
+* _ROCR_: used for plotting a ROC curve and accuracy/F-score vs threshold plot (prediction, performance)
+
+Created functions loaded in via "thesisFunctions.R". For more information see the corresponding file.
+
+* _plotBoxHist_:  plots a standardized boxplot and a histogram in one figure. The histogram includes a mean and median line. Used in the function describeVariable.
+
+* _plotBoxBar_: plots a standardized boxplot and a bar plot in one figure. Used in describeVariable.
+
+* _plotBox_: plots a standardized bar plot. Used in describeVariable.
+
+* _describeVariable_: describes a variable and returns the appropriate descriptive statistics. The function changes the description and plots based on whether the type of variable is a factor, discrete- or a continuous variable. In case of the latter, the parameter histogram = TRUE needs to be supplied.
+
+* _plotCor_: plots a detailed correlation plot, If pvalues = FALSE, all correlations are coloured gradiently from -1 to +1, negative relations are coloured reddish and positive relationships are coloured blueish. If pvalues = TRUE, all significant relations are coloured gradiently, all other insignificant relations will have a white background. Returns the correlation table and if pvalues = TRUE also the p-values table.
+
+* _cbAlpha_: calculates the Cronbach's alpha score, once for the normal input and once for the z-scaled variables of this input. Returns detailed scores and the correlations between the variables.
+
+* _plotBoxes_: plots standardized boxplots for all preferences in one figure, split by a binary factor variable.
+
+* _baseModelcv_: creates a base model and applies cross-validation. If a classification model is appropriate, then the majority class is taken as baseline and accuracy is measured. When a regression model is appropriate, RMSE is measured and the mean is used as a baseline. Returns the cross-validated score for every fold and the mean of these folds.
+
+* _bestSubsetcv_: applies best subset selection and cross-validates the scores for every best subset corresponding with that number of variables. In case of a classification, logistic regression is conducted and all best models are supplied as a parameter. These are externally found via the bestglm function. In case of a regression model, linear regression is used and all best models are internally found using regsubsets and the R2 score. Returns a matrix with cross-validated scores for every fold with that number variables, for all number of variables. Also returns the standard deviation, the mean for every number of variables, the 'true' best number of variables and the corresponding score and standard deviation.
+
+* _plotR2Subs_: plots the best R2 score for every number of variables and the variables corresponding with these scores in one figure. Returns the summary of regsubset.
+
+* _plotModels_: plots the output scores of cross-validated models and places a red dot at the best performing model in the plot and returns these scores.
+
+* _plotThreshold_: plots an Accuracy- and F-score- vs. threshold plot in one figure. If plotcontent = "ROC", a ROC curve is plotted and the AUC is returned.
+
+* _plotShrinkage_: generates a glmnet model and then plots the shrinkage the coefficients. The red dotted line corresponds with the best lambda and a blue dotted line corresponds with the best lambda plus one standard error.
+
+* _resultsLasso_: returns the results of the lassocv in a standardized way as 
+in the other created cv functions. Returns the 'true' best lambda and the corresponding score and standard deviation and the best lambda plus one standard error. Takes a measure input, and adjusts the output in case of a general linear model.
+
+* _plotBivariate_: plots a bivariate plot with a x variable and y variable and draws the general linear model or linear model best fit line. The plot and fit is adjusted if y == binary variable.
+
+* _nonLinearcv_: cross-validation is applied on non-linear models. The non-linear models shoud be supplied. Returns the standardized output as in bestsubsetcv.
+
+* _smoothSplinecv_: cross-validation is applied on smoothing splines for a range of supplied degrees of freedom from 2 until a supplied parameter of maxdegree. Returns the standardized output as in bestsubsetcv, but with the degrees of freedom included.
+```{r Load thesisFunctions.R, message = FALSE, warning = FALSE}
+source("thesisFunctions.R")
+```
+
+## Inspect workers
+
+### Load the data
+Two datasets are loaded in.
+
+* qualtricsNum: contains the survey data from Qualtrics in numerical values.
+Contains 317 entries and 61 variables (finished and unfinished surveys).
+* amazon: contains all information of mturk workers. Contains 209 
+submitted entries, leaving 108 unfinished survey due to multiple reasons.
+```{r Loading data}
+qualtrics <- read.csv2("data/qualtricsNum.csv") 
+dim(qualtrics)
+amazon <- read.csv2("data/amazon.csv", stringsAsFactors = FALSE)
+nrow(amazon)
+```
+
+### Join datasets
+In this section the datasets are prepared and joined together by the validation code, combining the validation code of Qualtrics with the inserted code by the workers on amazon. All incorrect matches are filtered. 204 workers remain and thus 5 workers have entered an invalid validation code.
+```{r prepare and join}
+amazon <- rename(amazon, valCode = Answer.surveycode)
+qualtrics$valCode <- as.character(qualtrics$valCode)
+qualtrics <- semi_join(qualtrics, amazon, by = "valCode")
+dim(qualtrics)
+```
+
+### Reject invalid workers
+Inspect the unmatched codes, these 5 entries are not matched and rejected.
+```{r reject}
+amazon[!(amazon$valCode %in% qualtrics$valCode), c("WorkerId", "valCode")]
+```
+
+### surveyTime
+The surveyTime variable is inspected to see whether some respondents have highly
+unlikely fast responses. First the column name is renamed, hereafter surveyTime is inspected. 
+
+A mean of 470 seconds, median of 433 seconds and minimum of 59 seconds is found. Furthermore, the first quantile (25 %) is around 293 seconds, almost 5 minutes. The histogram and boxplot of the surveyTime variable are plotted. 
+
+However, even though some very fast responses have been observed, to avoid meddling with the data too much they are kept in for further analysis. 
+```{r surveyTime}
+qualtrics <- rename(qualtrics, surveyTime = Duration..in.seconds.)
+attach(qualtrics)
+describeVariable(surveyTime, lab = "survey time (in seconds)", ylim = c(0,25), hist = TRUE)
+```
+
+## Pre-processing
+
+### Inspect the data
+The columns are first inspected, there are a lot of metadata variables and attention questions that can be removed. Some names, as willingness_ and description_ are unnecessary complicated, and risk contains a lot of variables inherited from the filter questions to measure risk.
+```{r inspect columns}
+names(qualtrics)
+```
+
+### Removing variables
+Since the metadata columns are irrelevant, these are removed. Furthermore, valCode, the attention check questions and the variables gender, nationality and age are removed. After the removal, 45 columns are left.
+```{r remove columns}
+qualtrics <- select(qualtrics, -(StartDate:consent), -contains("attention"), 
+ -(gender:valCode))
+dim(qualtrics)
+```
+
+### Recoding variable names
+Next, the variable names that contain willingness_ and description_ are recoded, because they inherited unintended names from Qualtrics
+```{r recoding variable names}
+names(select(qualtrics, contains("willingness"), contains("description")))
+names(qualtrics)[grepl("willingness*", names(qualtrics)) | grepl("description*", names(qualtrics))] <- c("negRec1", "negRec2", "altruism1", "posRec1", "negRec3", "trust")
+```
+
+### Recoding risk
+Now the staircase- and filter questions of risk are recoded.
+```{r staircase}
+names(select(qualtrics, contains("risk"), -risk1))
+```
+
+Only the risk variables that end on 10, 30, 50, 70 and 90 are used for determining the risk score, all others are removed.
+```{r staircase 2}
+qualtrics <- select(qualtrics, -c(contains("20"), contains("40"), contains("60"),
+  contains("80"), contains("00")))
+names(select(qualtrics, contains("risk"), -risk1))
+```
+
+Only the value that is not NA is counted, this is the particular risk score and all remaining risk variables are removed, except for risk1. The result is risk2, it contains the risk score and will be later inspected in more detail.
+```{r staircase 3}
+qualtrics <- mutate(qualtrics, risk2 = rowSums(select(qualtrics, 
+  contains("risk"), -risk1), na.rm = TRUE)) %>% 
+    select(-c(risk70:risk310))
+qualtrics$risk2
+```
+
+### Qualitative variables 
+Since dilemma and chicken are qualitative variables but imported as quantitative variables, they are transformed to factor variables. The levels of the variables are renamed to their corresponding categorical classes.
+```{r qualitative variables}
+summary(qualtrics[c("dilemma", "chicken")])
+qualtrics <- mutate_at(qualtrics, vars(dilemma:chicken), funs(as.factor))
+levels(qualtrics$dilemma) <- c("cooperate", "defect")
+levels(qualtrics$chicken) <- c("chicken", "dare")
+summary(qualtrics[c("dilemma", "chicken")])
+```
+
+### Re-ordering
+Finally, all the remaining variables are re-ordered in a logical way.
+```{r re-order}
+names(qualtrics)
+qualtrics <- qualtrics[c(grep("public", names(qualtrics)), grep("offer", names(qualtrics)), grep("respond", names(qualtrics)), grep("dilemma", names(qualtrics)), grep("chicken", names(qualtrics)), grep("negRec*", names(qualtrics)), grep("posRec*", names(qualtrics)), grep("altruism*", names(qualtrics)), grep("trust*", names(qualtrics)), grep("risk*", names(qualtrics)))]
+```
+
+### General description
+After all pre-processing, 15 variables and 204 observations are left, the variables contain five games, eight preferences and two risk variables.
+```{r explorative, message = FALSE}
+names(qualtrics)
+dim(qualtrics)
+head(qualtrics)
+str(qualtrics)
+attach(qualtrics)
+```
+
+## Univariate analysis
+Next, univariate analysis of all variables will be performed. It consists of two section: the game theoretical games and the preferences and risk variables.
+
+## Game theory
+In the first section all games are inspected.
+
+### Public goods
+Firstly, the amount invested in the public goods game is examined (in whole dollars). The mean is 4.53 and the median is 5 dollars, this is also the mode with 59 respondents (28.9%) investing 5 dollars. It has multiple peaks, one at 0 dollar, 5 dollars and at 10 dollars (all, half or nothing). The standard deviation is 3.46, which shows quite some variance, as is seen in the inter quartile range of the boxplot. The data is somewhat evenly distributed than the other two games, but still has a higher tendency in the lower numbers as confirmed by the interquartile range and the bar plot and does not follow a normal distribution caused by the multiple peaks. The excess kurtosis of -1.04 shows a mesokurtic character of the data. 
+
+The game theoretical solution would be to invest zero dollars, since you will share evenly in the pot no matter what amount you will invest in it. A player will thus maximize their investment by investing zero dollars in the pot, and still share evenly in the amount that other respondents have put into it. However, this is an inefficient solution, if everybody would cooperate, _all_ respondents would get more money, but this is not a stable solution since as mentioned above, the best scenario for an individual is then that everybody invest 10 dollars and you invest zero dollars. All in all, the game theoretical solution of investing zero dollars is mostly not found, only 40 of 204 (19,6%) respondents do play this way. Most likely altruism, trust and positive reciprocity plays a role in the amount invested, where this relation is expected to be positive.
+```{r public goods}
+describeVariable(public, lab = "Amount invested (in whole dollars)", ylim = c(0,60))
+```
+
+### Ultimatum game: offer
+The amount offered in the ultimatum game (in whole dollars) has a mean of 4.32 and a median of 5 dollars. This is also the mode with 114 (55.9%) respondents offering 5 dollars. The standard deviation is 1.72. Furthermore, as expected, the data is centredto the left, to the lower number (5 or smaller). This can also be seen in the bar plot and in the boxplot, such as that the inter quartile range is from 3 to 5, note the axis of the bar plot. The data is strongly leptokurtic, confirmed by a excess kurtosis of 3.03. There are also some outliers, namely seven offers of 10 dollars, but all offers greater than 5 dollar are somewhat odd. 
+
+The game theoretical solution is an offer of 1 dollar, which in turn a rational person would accept since every offer greater than zero is more than receiving nothing and should be accepted. However, theory states that negative reciprocity cause people to turn down offers that seem unfair. Most likely person adjust their offer on what they think people what people will accept, as can be seen in the distributions, and might offer lower if they are willing to take risk. It could also be possible that respondents might offer a 'friendly' amount, this relates to positive reciprocity or altruism, this relation is expected to be positive.
+```{r ultimatum: offer}
+describeVariable(offer, lab = "Amount offered (in whole dollars)", ylim = c(0,120))
+```
+
+### Ultimatum game: response
+The amount that is minimally acceptable in the ultimatum game (in whole dollars) has a mean of 3.76 and a median of 4  dollars, with an standard deviation of 1.81. The results are lower than in the ultimatum game offer, indicating some kind of inefficiency. Nonetheless, the mode is 5 dollars with 69 respondents (33.8%). Furthermore, the data is even more centredto the lower values than the offered amount, as can be seen in the histogram by the interquartile range and distance from the whisker to the 25% quantile, and also in the bar plot. Again, there are some outliers, namely three respondents found 10 dollar minimally acceptable and eleven respondents demanded more than 5 dollars. Five respondents accept a bid of 0 dollars. The excess kurtosis of 0.65 shows a slight leptokurtic character of the data. 
+
+As mentioned above, the rational solution would be to accept every offer greater than 0, however these results are not found. Theory states that this is caused by negative reciprocity, people will reject what they deem as unfair offers.
+```{r ultimatum}
+describeVariable(respond, lab = "Minimum acceptable amount (in whole dollars)", ylim = c(0,80))
+```
+
+### Prisoner's dilemma
+The percentage of respondents that chose defect is 32%, corresponding with a total of 138 co-operators and 66 defectors. The game theoretical solution is defect, since in all scenario's defect will maximize payoffs and is thus a dominating strategy. This solution is in great contrast with the actual found results. Most likely trust, altruism and/or positive reciprocity plays a role in cooperating. The relation is expected to be a positive one.
+```{r dilemma}
+describeVariable(dilemma)
+``` 
+
+### Chicken game
+Next the chicken game is studied. The percentage of dares is 27%, this corresponds 148 respondents playing chickens and 56 dare. There are slightly more co-operators/chickens in the chicken game than in the prisoner's dilemma. The game theoretical solution would be a percental combination of chicken and dare, in this case dare is not a dominating strategy. [CALCULATE] Most likely trust, altruism, positive reciprocity and risk plays a role in cooperating. The first 3 are expected to have a positive relationship, but the latter a negative relationship. The higher the risk, the more likely defect is chosen.
+```{r chicken}
+describeVariable(chicken)
+```
+
+## Preferences and risk
+In this part the preferences and risks are inspected.
+
+### Trust
+Firstly, the concept trust is inspected. It measures whether people assume others have good intentions. It has a mean of 5.39. The median, and the mode lie at 5. The standard deviation is 2.56 and the data is approximately symmetric, but has a tendency for higher scores. Furthermore the data has a slightly mesokurtic character, shown by the value of -0.42.
+```{r trust}
+describeVariable(trust, lab = "trust score (in integers)", ylim = c(0,50))
+```
+
+### Negative reciprocity
+Secondly, the concept negative reciprocity is inspected. In general it measures the tendency in which people are willing to punish others even at a cost for themselves.
+
+#### negRec1
+The first variable is negRec1, it measures how willing people are to punish someone who treats them unfairly, even at a cost for them self. It has a mean of 3.73, the median lies at 3 and the mode at 0. The standard deviation is 2.82 and the data is slightly right skewed with a higher tendency for lower scores, and has no symmetric characteristics. The data has a mesokurtic character, shown by the value of -0.89.
+```{r negRec1}
+describeVariable(negRec1, lab = "negRec1 score (in integers)", ylim = c(0,35))
+```
+
+#### negRec2
+negRec2 measures how willing people are to punish someone who treats _others_ unfairly, even at a cost for them self. It has a mean of 3.87, the median lies at 4 and the mode at 0. The standard deviation is 2.87 and the data is slightly right skewed with a higher tendency for smaller scores, and has no symmetric characteristics. Furthermore the data has a mesokurtic character, shown by the value of -1.04.
+```{r negRec2}
+describeVariable(negRec2, lab = "negRec2 score (in integers)", ylim = c(0,35))
+```
+
+#### negRec3
+negRec3 measures people's tendency to take revenge if threaten unfairly, even at a cost for them self. It has a mean of 2.69, the median lies at 2 and the mode at 0. The standard deviation is 2.72 and the data is right skewed with a strong tendency for smaller scores, confirmed by the skewness value of 0.77 and has no symmetric characteristics at all. Furthermore the data has a slight mesokurtic character, shown by the value of -0.55.
+```{r negRec3}
+describeVariable(negRec3, lab = "negRec3 score (in integers)", ylim = c(0,60))
+```
+
+### Positive reciprocity
+Now, the concept positive reciprocity is inspected. In general it measures the tendency in which people are willing treat others well, who treat them well, even at a cost for themselves.
+
+### posRec1
+posRec1 measures people's willingness to return a favour. It has a mean of 8.27, the median lies at 9 and the mode at 10. The standard deviation is 2.09 and the data is strongly left skewed with a tendency for higher scores, confirmed by a skewness of -1.4 and has no symmetric characteristics. It has excess kurtosis of 1.82 indicating a leptokurtic character of the data. 
+```{r posRec1}
+describeVariable(posRec1, lab = "posRec1 score (in integers)", ylim = c(0,100))
+```
+
+### posRec2
+posRec2 measures if people are willing to give a gift worth of 5, 10, 15, 20, 25 or 30 dollars, or give no present to a stranger in return for a costly helpful deed (costing the stranger 20 dollars). It has been coded from steps from 0 to 6. For the description it will be re-coded to the original values of 0 to 30, by multiplying the variable with 5. 
+
+It has a mean of 15.25, the median lies at 15 and the mode at 20 dollars. The standard deviation is 9.01 and the data is somewhat symmetric, but has a mesokurtic character shown by the value of -1.09 and multiple peaks at 5 and 20.
+```{r posRec2}
+posRec2Recoded <- posRec2 * 5
+describeVariable(posRec2Recoded, lab = "Amount gifted to a helpful to stranger (in dollars)", ylim = c(0,60))
+```
+
+### Altruism
+Now, the concept altruism is inspected. In general it measures the care and concern for the happiness and well-being of other people.
+
+#### altruism1
+altruism1 measures if people are willing to give to good causes without expecting anything in return. It has a mean of 7.11, the median lies at 7 and the mode at 6. The standard deviation is 2.43 and the data is moderately left-skewed shown by the value of -0.76, with a tendency for higher scores. It has no symmetric characteristics and has an approximately platykurtic character shown by the value of 0.32.
+```{r altruism1}
+describeVariable(altruism1, lab = "altruism1 score (in integers)", ylim = c(0,50))
+```
+
+#### altruism2
+altruism2 measures how much people are willing to donate to a good cause if they unexpectedly received 1000 dollars. It has a mean of 115.62, the median lies at 100. The standard deviation is 166, this means that it has quite a large variance, this is caused by outliers. It has quite some outliers offering more than 250 dollars. The data is very strongly right-skewed confirmed by the skewness value of 2.62, with a tendency for lower values and has very a strong leptokurtic character shown by the value of 8.22. 
+```{r altruism2}
+describeVariable(altruism2, lab = "Amount donated to a good cause (in whole dollars)", ylim = c(0,100), hist = TRUE)
+```
+
+### Risk
+Lastly, the concept risk is inspected. It has to be noted that this is not a social preference. In general it measures the willingness to take risks under uncertainty.
+
+#### risk1
+risk1 measures willingness to take risks. It has a mean of 4.59, the median lies at 5 and the mode at 3. The standard deviation is 2.43 and the data is approximately symmetric, but has a mesokurtic character shown by the value of -0.99.
+```{r risk1}
+describeVariable(risk1, lab = "risk1 score (in integers)", ylim = c(0,40))
+```
+
+#### risk2
+risk2 uses a staircase type of questions, whether people prefer a 50/50 chance of receiving 300 dollars or nothing, or a certain amount of dollars as a sure payment. It has been coded to a scale from 0 to 32. For the description it is recoded to the original values of 5 to 315 dollars. It has a mean of 97 dollars, the median lies at 85.
+
+Respondents show a strong tendency for risk-aversive behaviour. The standard deviation is 7.27 and the data is strongly right skewed shown by the value of 1.11 and has multiple peaks at approximately 40 dollars, 100 dollars, 150 dollars and 200 dollars. The kurtosis of 0.98 show a mesokurtic character of the data.
+```{r risk2}
+risk2Recoded <- risk2 * 10 - 5
+describeVariable(risk2Recoded, lab = "Amount of sure payment preferred (in dollars)", ylim = c(0,40), hist = TRUE)
+```
+
+## Multi-indicator concepts
+As the correlation plot shows negRec has very high correlations in-between the negRec variables, just as altruism and risk. High correlations between and in-between preferences are found and this (multi-)collinearity could create a problem in linear regression. When collinearity is present it can be difficult to determine how each one variable is separately associated with the response variable. This reduces the accuracy of the estimates of the coefficients and causes the standard error to grow and thus could fail to reject valid null-hypothesis.
+
+When possible, the variables are joined together. Another important reason is that these multi-indicator concepts are not caught by one measure, but by the combination of measures that captures the underlying concepts. So it is preferred to combine the underlying concepts to provide a more internal reliable and full measure of the concept. To measure if the variables can be joined together Cronbach's Alpha is used.
+```{r correlation preferences}
+preferences <- select(qualtrics, c(negRec1:risk2))
+plotCor(preferences)
+```
+
+### negRec
+First the correlations and Cronbach's alpha of negRec is measured for the unscaled and scaled variables. The results show a Cronbach's Alpha of 0.81 for the unscaled negRec variables, which is higher than the threshold of 0.7. The scaled variables do not improve the Cronbach's Alpha, so the unscaled variables of negRec are joined together.
+```{r alpha negRec}
+cbAlpha(negRec1, negRec2, negRec3)
+```
+
+#### negRecPooled
+The joined variable is called negRecPooled. It has a mean of 3.43, the median lies at 3.33. the standard deviation is 2.39. negRecPooled shows a somewhat more symmetric character than the uncombined variables of negRec. Nonetheless, the data is somewhat right skewed with a higher tendency for lower scores. The data has a mesokurtic character, shown by the value of -0.77.
+```{r negRecpooled, message = FALSE}
+qualtrics$negRecPooled <- cbAlpha(negRec1, negRec2, negRec3)$alpha$scores
+attach(qualtrics)
+describeVariable(negRecPooled, lab = "negRecPooled Score", ylim = c(0,30), hist = TRUE)
+```
+
+#### Re-order
+Afterwards the former negRec variables are deleted and the order is adjusted.
+```{r re-order negRecPooled}
+qualtrics <- select(qualtrics, -c(negRec1:negRec3))
+indexNegPooled <- grep("negRecPooled", names(qualtrics))
+qualtrics <- qualtrics[c(1:5, indexNegPooled, 6:(indexNegPooled-1))]
+names(qualtrics)
+```
+
+### posRec
+Next positive reciprocity is inspected. A low Cronbach's alpha is found of 0.47, even after scaling the variables it barely improved. Due the lack of internal reliability it is decided to keep the variables apart.
+```{r alpha posRec}
+cbAlpha(posRec1, posRec2)
+```
+
+### Altruism
+After this altruism is inspected and a very low Cronbach's alpha is found of 0.01, after scaling the variables the Cronbach's alpha increases to 0.34. Since  outliers of altruism2 were found and to prevent these from influencing to much altruism2 is log transformed, this significantly improves the Cronbach's alpha to 0.58, but is still to low to join the variables together. Due the lack of internal reliability it is decided to keep the variables apart.
+```{r alpha altruism}
+cbAlpha(altruism1, altruism2)
+
+altruism2Log <- log(ifelse(altruism2 == 0, 1, altruism2))
+cbAlpha(altruism1, altruism2Log)
+```
+
+### Risk
+Next risk is inspected. However a low Cronbach's alpha of 0.37 is found, the scaled variables increases the Cronbach's alpha to 0.57, Due the lack of internal reliability it is decided to keep the variables apart.
+```{r alpha risk}
+cbAlpha(risk1, risk2)
+```
+
+### Joined correlations
+After joining the variables, correlations are still present but the highest correlations of negRec are solved. Nonetheless, collinearity might still be an issue.
+```{r joined preferences}
+preferences <- model.matrix(~ ., data = qualtrics)[,-c(1:6)]
+plotCor(preferences)
+``` 
+
+## Model building
+
+### Test set
+A test set is created to avoid data snooping and overfitting, and to have an extra test set to measure final performance. The data is split in 6 folds. 1 separate test fold and 5 remaining trainings fold, which is used to perform cross-validation. The test set consists of 34 observations.
+```{r test set}
+set.seed(256)
+test <- sample(1:nrow(qualtrics), size = nrow(qualtrics) / 6)
+testQualtrics <- qualtrics[test,]
+dim(testQualtrics)
+```
+
+### Train set
+The training set is used for cross-validation. However, for some basic exploration it is sometimes too cumbersome and in that case all trainings data is used. The train set consists of 170 observations. Three datasets are created one with all variables included, one with only the preferences and risk variables and a z-scaled dataset of all preferences and risk.
+```{r train split}
+trainQualtrics <- qualtrics[-test,]
+dim(trainQualtrics)
+trainPreferences <- preferences[-test,]
+dim(trainPreferences)
+trainPreferencesScaled <- data.frame(scale(trainPreferences))
+trainPreferencesScaled <- model.matrix(~ ., data = trainPreferencesScaled)
+```
+
+### Cross-validation
+5-fold cross-validation is used for training the data, to get more valid results and to prevent overfitting. The foldid's used are used in all models whenever possible to make sure models are comporable with each other, but this is not possible in the boosting method. The final result is 5 validation folds of 34 observations and a separate sixth test set of 34 observations, the test set. 
+```{r cross-validation}
+set.seed(128)
+foldid <- sample(rep(1:5, length = nrow(trainQualtrics)))
+table(foldid)
+```
+
+## Public goods
+First a subset of trainQualtrics is taken with only public good as dependent variable and the preferences, all the other games are excluded.
+```{r model public, message = FALSE}
+trainPublic <- select(trainQualtrics, -c(offer, respond, dilemma, chicken))
+attach(trainPublic)
+```
+
+### Bivariate analysis
+It must be noted that these are just bivariate relationships and only contain 
+a subset of all the data and do not account for any relations accounted by confounding variables because of the collinearity between the predictors.
+
+Spearman's rang correlation is chosen because most of these variables are asymmetric and mesokurtic or leptokurtic and Spearman's rang correlation is a non-parametric method, which makes no assumptions based on normality and is less influenced by outliers.
+
+The following (absolute) correlations of greater than 0.10 are found:
+
+* Positive relationship with posRec1 (0.13).
+* Positive relationship with posRec2 (0.15).
+* Positive relationship with altruism1 (0.28).
+* Positive relationship with altruism2 (0.29).
+* Positive relationship with trust (0.2).
+```{r bivariate public, message = FALSE}
+plotCor(trainPublic)
+```
+
+### Base model
+A base model is conducted using the basemodelcv function, it calculates the mean of the four training folds and then uses this mean as prediction for the remaining validation fold, repeated for all folds. A cross-validated MSE score of 11.36, a standard deviation of 2.57 and a RMSE of 3.37.
+```{r basemodel public}
+baseline <- baseModelcv(trainPublic, foldid)
+baseline
+mseBase <- baseline$meancv
+```
+
+### Best subset selection
+A best subset selection is performed on all trainings data and then the R2 score is used to chose the best model for every number of variables. As the plot shows altruism1 explains a little more than 9% of all the variance in the model. Adding a second predictor altrusim2 explains approximately 13% of all variance. After those two variables, little increase is gained. 
+```{r regsubset public}
+bestPublic <- regsubsets(public ~ ., data = trainPublic)
+plotR2Subs(bestPublic)
+```
+
+A best subset selection cross-validation is conducted using the bestsubsetcv function. It applies the regsubsets function and trains the best model for that specific number of variables on four folds and uses that model to predict the remaining validation fold, repeated for all folds. The best performing model has two variables, as expected reviewing the R2 score above. These number of variables correspond with a MSE of 10.12, a standard deviation of 2.36 and a RMSE of 3.18.
+```{r bestsubsetcv public}
+bestSubs <- bestSubsetcv(trainPublic, foldid)
+bestSubs
+mseBestSub <- bestSubs$bestnmean
+plotModels(bestSubs$meancv, baseline)
+```
+
+The variables in the best model are altruism1 and altruism2, which confirms the findings of the R2 plot. The corresponding coefficients are 0.39 for altruism1 and 0.0038 for altruism2. This means that if the altruism1 score increases with one, the amount invested in the public funds increases on average with 0.39. For every dollar gifted to a good cause in altruism2, the amount invested in the public fund increases on average with 0.0038. The model as a whole is significant, furthermore altruism1 is very significant (<0.001) and altruism2 is moderately significant and has a p-value of 0.0137. Since altruism2 is on a different scale the standardized coefficients are calculated to compare the coefficients, in that case altruism1 has a coefficient of 0.28 and altruism2 of 0.18.
+```{r coefficients public}
+bestSubMdl <- public ~ altruism1 + altruism2
+bestSubFit <- lm(bestSubMdl, data = trainPublic)
+summary(bestSubFit)
+lm.beta(bestSubFit)
+```
+
+### Lasso
+The lasso model is performed, it uses cross-validation to find the best lambda. The best performing model has a lambda of 0.19 and a corresponding MSE of 10.27 and a RMSE of 3.18, which is worse than the best subset selection method. However, the standard deviation of 1.15 is a lot lower compared to the previous models and is thus more stable. As the plot shows, the optimal lambda includes four variables, however the lambda plus 1 standard error is corresponds with the base model, this shows that the difference isnt't very substantial.
+```{r lasso}
+lassocv <- cv.glmnet(trainPreferences, public, alpha = 1, foldid = foldid)
+resultsLasso(lassocv)
+mseLasso <- min(lassocv$cvm)
+plot(lassocv)
+```
+
+The shrinkage plot shows the shrank coefficients for all variables, the red dotted line corresponds with the best lambda and the blue line corresponds with the lambda plus 1 standard error. The plot shows that the best lambda  altruism1, altruism2, trust and posRec2. Where the first two were also found via best subset selection method. The coefficient that corresponds with this penalty factor can be seen underneath. posRec2 is just barely included. 
+```{r shrinkage}
+plotShrinkage(trainPreferences, public, lassocv)
+legend('topleft', legend = c("altruism1", "altruism2", "trust", "posRec2"), 
+  lwd = 2, col= c("blue2", "cyan", "mediumorchid1", "seagreen3"))
+predict(lassocv, type = "coefficients", s = lassocv$lambda.min)
+```
+
+This next shrinkage plot shows the same coefficients but then on a scaled dataset, now the coefficients can be compared. Altruism1 and altruism2 have the highest coefficients, which corresponds with the findings of the best subset selection method. This is followed by trust, which also had high bivariate correlation, and posRec2 is barely included.
+```{r shrinkage scaled}
+plotShrinkage(trainPreferencesScaled, public, lassocv)
+legend('topleft', legend = c("altruism1", "altruism2", "trust", "posRec2"), 
+  lwd = 2, col= c("blue2", "cyan", "mediumorchid1", "seagreen3"))
+```
+
+### Non-linearity
+Non-linear relations for the best subset model are examined. The residual plot shows some non-linearity mostly prevalent in altruism1, this is confirmed by the p-value of adding second degree term for altruism1 of 0.055, this is on the border of significance.
+```{r non-linearity}
+residualPlots((bestSubFit),pch=19)
+```
+
+As mentioned before adding another second degree term would be almost significant and thus might improve cross-validated MSE and better fit the true relationship. Inspecting the scatterplot of public and altruism1 seems to confirm this suspicion. However, the plot is an simplified approximation of the true relationship because it only is based on one variable.
+```{r non-linear altruism1}
+plotBivariate(altruism1, public)
+```
+
+Multiple models to the 4th degree polynomial term of altruism1 are created. First a cross-validated non-linear model is applied to test performance. The best performing model contains a polynomial of altruism to the third degree and altruism2. It has an MSE of 9.85 and a RMSE of 3.14. The standard deviation is 2.25 which is even lower than then the original best subset selection method. So, even though the model is more complex the results are more stable, but less stable than lasso.
+```{r non-linear models}
+mdl2 <- public ~ poly(altruism1, 2) + altruism2
+mdl3 <- public ~ poly(altruism1, 3) + altruism2
+mdl4 <- public ~ poly(altruism1, 4) + altruism2
+models <- c(bestSubMdl, mdl2, mdl3, mdl4)
+
+polynomial <- nonLinearcv(trainPublic, foldid, models)
+polynomial
+msePoly <- polynomial$bestnmean
+
+plotModels(polynomial$meancv, baseline, xlab = "Models plus polynomial to nth degree", axislabels = c("Base", "Bestsub", 2:4))
+```
+
+As the bivariate plot shows, a polynomial to the third degree seems to better fit the data.
+```{r bivariate non-linear altruism1}
+poly3Altruism1 <- lm(public ~ poly(altruism1, 3), data = trainPublic)
+preds <- predict(poly3Altruism1, newdata = list(altruism1 = 0:max(altruism1)))
+plotBivariate(altruism1, public)
+lines(0:max(altruism1), preds, col = "blue", lwd = 2)  
+```
+
+### Boosting
+The final model is a non-parametric model that tackles the residuals using an ensemble method called boosting, it gradually builds trees on the residuals. library caret is loaded in and will not conflict with the previous used packages. First the parameters are set to train the model.
+```{r public boosting, message = FALSE}
+library(caret)
+
+fitControl <- trainControl(method = "cv", number = 5)
+gbmGrid <- expand.grid(interaction.depth = c(1, 2, 4, 8), n.trees = (1:10)*200, n.minobsinnode = 10, shrinkage = c(0.001))
+```
+
+The model is trained. A MSE of 10.53, and a RMSE of 3.24 is found, which is higher than found in other simpler models. The optimal settings are 1200 trees, an interaction.depth of 2 and shrinkage factor of 0.001. 
+```{r fit gbm public}
+set.seed(64)
+gbmfit <- train(public ~ ., data = trainPublic, method = "gbm", verbose = FALSE,
+  trControl = fitControl, tuneGrid = gbmGrid, distribution = "gaussian")
+gbmfit
+
+plot(gbmfit)
+gbmfit$results[which.min(gbmfit$results$RMSE),1:6]
+mseBoost <- min(gbmfit$results$RMSE)^2
+mseBoost
+```
+
+The most important variables are the same found in all other methods: altruism1, followed by altruism2 and trust. The relative influence of altruism1, altruism2 and trust is 43%, 20% and 10% respectively. These 3 variables have a relative importance of approximately 83% and the results correspond with findings of the previous models.
+```{r boost importance}
+set.seed(32)
+gbmBestFit <- gbm(public ~ ., data = trainPublic, distribution = "gaussian", n.trees= 1200, interaction.depth = 2)
+summary(gbmBestFit)
+```
+
+### Final models
+The final model are inspected. As can be seen, the best performing model is the combined model. The best subset selection improves with more than 12% compared to the base model. Adding a polynomial or a square root further decreases MSE. Lasso performs slightly worse. The combined model of square root and polynomial with trust added to the model performs best with a MSE of 9.83. This is a decrease of MSE of 13%, however the increase compared to the more simple polynomial containing altruism1 to the third degree and altruism2 is very small. Therefore the simpler polynomial model is chosen.
+```{r public final model}
+finalModels <- data.frame(MSE = c(mseBase, mseBestSub, mseLasso, msePoly, mseBoost), row.names = c("Base", "BestSub", "Lasso", "Poly", "Boost"))
+finalModels
+
+plotModels(finalModels$MSE, xlab = "Final models", axislabels = rownames(finalModels))
+```
+
+### Final prediction
+Now the final predictions on test set are performed. The model is first trained on all training data. The base model scores a MSE of 15.15 on the test set and a RMSE of 3.89. The best model scores quite lower MSE with a 12.43 and a RMSE of 3.53. On the test set the final models performs 18% better than the base model, when measured in MSE.
+```{r test prediction}
+ytrue <- qualtrics[test, "public"]
+baseMse <- mean((ytrue - mean(public))^2)
+baseMse
+sqrt(baseMse)
+
+finalModel <- public ~ poly(altruism1, 3) + sqrt(altruism2)
+finalFit <- lm(finalModel, data = trainPublic)
+yhat <- predict(finalFit, qualtrics[test,])
+finalMse <- mean((ytrue - yhat)^2)
+finalMse
+sqrt(finalMse)
+```
+
+### Significance testing
+Models are created to check for significance from less complex to more complex models on all data, thus including train and test set. Starting with bivariate analysis, using a non-directional Spearman's rang correlations test with a p-value threshold of 0.10. This shows a significant relation for altruism1 (0.05), altruism2 (0.01) and trust (0.02), all but trust were also included in the final model. These variables were also part of the lasso model and the first in best subset selection method, and all were found to be the most important using the boosting method. 
+```{r significance public, message = FALSE}
+qualtricsPublic <- select(qualtrics, -c(offer, respond, dilemma, chicken)) 
+attach(qualtricsPublic)
+plotCor(qualtricsPublic, pvalues = TRUE)
+```
+
+Now, the multivariate models are examined. The first model is the model found in best subset selection. The model has a R2 score 0.13, it is very significant effect for altruism1 (<0.001) and altruism2 (0.075).
+```{r model1}
+bestSubFit <- lm(bestSubMdl, data = qualtricsPublic)
+summary(bestSubFit)
+```
+
+Adding the square root to altruism2 barely the reduces RMSE, and in this model the polynomial of the third degrees loses it's weak significance.
+```{r model 2}
+mdl2 <- public ~ poly(altruism1, 3) + sqrt(altruism2)
+fit2 <- lm(mdl3, data = qualtricsPublic)
+summary(fit2)
+```
+
+Adding the polynomial to altruism1 is significant for first degree (<0.001), the second degree (0.04) and weakly for the third degree (0.09) the altruism2 is also very significant (0.009). This model explains 16.2% of all the variance in the model. The coefficients of the final model are 13.83, -6.55 and -5.44 for the altruism1 and polynomial terms. Altruism2 has a coefficient of 0.004.
+```{r finalfit public}
+finalFit <- public ~ poly(altruism1, 3) + altruism2
+finalFit <- lm(finalFit, data = qualtricsPublic)
+summary(finalFit)
+```
+
+Finally a anova test is conducted, this test confirms these findings and show that adding polynomial terms is significant, but that adding square root term barely improves the model.
+```{r anova models}
+anova(bestSubFit, fit2, finalFit)
+```
+
+### Diagnostics
+In this section the diagnostics of the models are conducted. Beginning with a general overview plot of the model. It shows normality, no strong outliers or high influence points. Next the assumptions are investigated in more detail.
+```{r diagnostics public}
+par(mfrow=c(2,2))
+plot(finalFit, pch = 19) 
+```
+
+#### Non-linearity
+As seen in the tested polynomial models above, there is no strong evidence that non-linearity would improve this model. This is also confirmed by the p-values underneath which show the effect of adding a second degree polynomial term of the variables. Most non-linearity is already accounted for due to the polynomial third degree term of altruism1.
+```{r non-linearity public}
+par(mfrow=c(1,1))
+residualPlots((lm(finalFit, data = qualtricsPublic)), pch=19)
+```
+
+#### Correlation of error terms
+The second test is an inspection of correlation of error terms, however there is no evidence for correlation of error-terms as found in the Durbin Watson test.
+```{r durbinWatson Public}
+durbinWatsonTest(finalFit)
+```
+
+#### Heteroskedasticity
+The residuals vs. predicted plot does show small evidence of heteroskedasticity, in the beginning the funnel is smaller and than it breaks and the width stays the same but in general the residuals form a attern to the lower numbers, it is important to note that the assumptions of confidence interval and hypothesis tests do rely on this assumption.
+```{r heterodekdacity Public}
+plot(finalFit, which = 1, pch = 19)
+```
+
+#### Outliers
+There seems to be no evidence for outliers, this found in the studentized residuals plot. None of the residuals have a z-score > 2.
+```{r outliers Public}
+rstud <- rstudent(finalFit)
+plot(rstud, pch = 19, main = "Rstudent plot")
+```
+
+#### High leverage points
+There are four points that do have quite high leverage (>0.10). Removing these high leverage points and refitting the data, shows that the third degree polynomial of altruism1 disappears and the second degree term becomes less significant, furthermore the R2 and RMSE stays about the samen. Only the coefficient of the first poly seem to change a little, all the rest stay more or less the same.
+```{r hlev public}
+hlev <- hatvalues(finalFit)
+plot(hlev, pch = 19, main = "High leverage plot")
+abline(h = 0.15, col = "red", lty = 2)
+
+summary(lm(finalFit, data = qualtricsPublic))
+summary(lm(finalFit, data = qualtricsPublic[!(hlev > 0.15),]))
+```
+
+#### Influential points
+All influential points are well under 1. The Residuals vs. Leverage Plot and the Cook's Distance plot show that there are high-leverage points, but there is no evidence for influental points due the lack of outliers. 
+```{r influential points}
+plot(finalFit, which = 5, pch = 19)
+plot(finalFit, which = 4, pch = 19)
+```
+
+#### Collinearity
+The last diagnostic tests collinearity, as observed earlier there is high collinearity between variables and this possibly influences the coefficients of the variables. However there is no evidence for multicollinearity as the VIF scores shows.
+```{r collinearity public}
+vif(finalFit) 
+plotCor(data.frame(altruism1, altruism2, trust))
+```
+
+## Offer
+First a subset of trainQualtrics is taken with only the made offer in the ultimatum game as dependent variable and the preferences, all the other games are excluded. 
+```{r offer, message = FALSE}
+trainOffer <- select(trainQualtrics, -c(public, respond, dilemma, chicken))
+attach(trainOffer)
+```
+
+### Bivariate analysis
+For the same reason as in public goods, Spearman's rang correlation is chosen. Furthermore, it must be noted that these are just bivariate relationships and do not account for possible confounding relations.
+
+The following (absolute) correlations of greater than 0.10 are found:
+
+* Negative relationship with negRecPooled (-0.11)
+* Positive relationship with posRec1 (0.13).
+* Positive relationship with posRec2 (0.31).
+* Positive relationship with altruism1 (0.1).
+```{r bivariate offer, message = FALSE}
+plotCor(trainOffer)
+```
+
+### Base model
+A base model is conducted using the basemodelcv function. A cross-validated MSE score of 3.30 and a standard deviation of 1.70 and a RMSE of 1.82 are found.
+```{r basemodel offer}
+baseline <- baseModelcv(trainOffer, foldid)
+baseline
+mseBase <- baseline$meancv
+```
+
+### Best subset selection
+A best subset selection is performed on all training data. As the plot shows posRec2 explains a little more than 6% of all the variance in the model. By adding any other variables, little increase is gained.
+```{r bestsubset offer}
+bestOffer <- regsubsets(offer ~ ., data = trainOffer)
+plotR2Subs(bestOffer)
+```
+
+A best subset selection is conducted using the bestsubsetcv function. The best performing model has one variable, as expected reviewing the R2 score above. One variable model corresponds with a MSE of 3.13, a standard deviation of 1.8 and a RMSE of 1.77.
+```{r bestsubsetcv offer}
+bestSubs <- bestSubsetcv(trainOffer, foldid)
+bestSubs
+mseBestSub <- bestSubs$bestnmean
+plotModels(bestSubs$meancv, baseline)
+```
+
+The variable for the best model is posRec2, this confirms with the findings of the R2 plot and the bivariate analysis. The corresponding coefficient is 0.26. This means that people that give 5 dollars extra to a helpful stranger, what corresponds with an increase of 1 in the non-recoded variable range (see posRec2), the amount offered increases on average with 0.259. Furthermore the model and the posRec2 variable is strongly significant (<0.001)
+```{r bestsubset coef}
+bestSubFit <- lm(offer ~ posRec2, data = trainOffer)
+summary(bestSubFit)
+plotBivariate(posRec2, offer)
+``` 
+
+### Lasso
+The best performing model has a lambda of 0.20 and a corresponding MSE of 3.17 and a RMSE of 1.78, which is slightly worse than the best subset selection method. However, the standard deviation of 0.79 is a lot lower and results are thus more stable. As the plot shows, the optimal lambda includes one variable, however the lambda plus 1 standard error corresponds with the base model, this shows that the difference isn't  very substantial.
+```{r lasso offer}
+lassocv <- cv.glmnet(trainPreferences, offer, alpha = 1, foldid = foldid)
+resultsLasso(lassocv)
+mseLasso <- min(lassocv$cvm)
+plot(lassocv)
+```
+
+The shrinkage plot shows the shrank coefficients. The plot shows the best lambda includes one variable, posRec2. This was also found in the best subset selection method. The coefficient corresponding with this penalty factor is 0.147.
+```{r lasso shrinkage offer}
+plotShrinkage(trainPreferences, offer, lassocv)
+legend('topleft', legend = c("posRec2"), lwd = 2, col= c("seagreen3"))
+predict(lassocv, type = "coefficients", s = lassocv$lambda.min)
+```
+
+### Non-linearity
+Non-linear relations for the best subset model are examined. The residual plot shows linearity, adding a polynomial of posRec2 would not be significant, shown by a p-value of 0.147.
+```{r polynomials offer}
+residualPlots((bestSubFit), pch=19)
+```
+
+### Boosting
+The final model is a gradient boosting machine. First the parameters are set to train the model.
+```{r boosting offer}
+fitControl <- trainControl(method = "cv", number = 5)
+gbmGrid <-  expand.grid(interaction.depth = c(1, 2, 4, 8), n.trees = (0.1:10)*100, n.minobsinnode = 20, shrinkage = c(0.001))
+```
+
+The model is trained. A MSE of 3.02 and a RMSE of 1.74 is found, which is lower than found in other simpler models. The optimal settings have 710 trees, an interaction.depth of 2, n.minosinnode of 20 and a shrinkage factor of 0.001.
+```{r gbmfit offer}
+set.seed(64)
+gbmFit <- train(offer ~ ., data = trainOffer, method = "gbm", verbose = FALSE, trControl = fitControl, tuneGrid = gbmGrid, distribution = "gaussian")
+gbmFit
+plot(gbmFit)
+gbmFit$results[which.min(gbmFit$results$RMSE),1:6]
+mseBoost <- min(gbmFit$results$RMSE)^2
+mseBoost
+```
+
+The most important variable is the same found in all other methods, posRec2. The second most important variable is altruism2. The relative influence of posRec2 is 52% and altruism2 is 28%, together having an importance of more than 80%. 
+```{r summary boost offer}
+set.seed(32)
+gbmBestFit <- gbm(offer ~ ., data = trainOffer, distribution = "gaussian", n.trees= 710, n.minobsinnode = 20)
+summary(gbmBestFit)
+```
+
+### Final models
+The final models are inspected. As can be seen, the best performing model is the boosting method. The best subset selection improves with more than 5% compared to the base model. The Lasso method performs slightly less, but has a lower standard deviation. A more complex method boosting decreases the RMSE to 3.02 and decreases compared to the base model with 8%. The boosting method is chosen.
+```{r final offer}
+finalModels <- data.frame(MSE = c(mseBase, mseBestSub, mseLasso, mseBoost), row.names = c("Base", "BestSub", "Lasso", "Boost"))
+finalModels
+
+plotModels(finalModels$MSE, xlab = "Final models", axislabels = rownames(finalModels))
+```
+
+### Final predictions
+Now the final predictions on test set is performed. The model is already trained on all training data in the boosting section. The base model scores a MSE of 1.56 on the test set and a RMSE of 1.25. The best model scores slightly lower MSE with a 1.52 and a RMSE of 1.23. On the test set the final models performs barely 3% better than the base model, when measured in MSE.
+```{r final predictions offer}
+ytrue <- qualtrics[test, "offer"]
+baseMse <-  mean((ytrue - mean(trainOffer$offer))^2)
+baseMse
+sqrt(baseMse)
+
+yhat <- predict(gbmBestFit, newdata = qualtrics[test,], n.trees = 710)
+finalFit <- mean((ytrue - yhat)^2)
+finalFit
+sqrt(finalFit)
+``` 
+
+### Final model inspection
+The best final model, boosting is trained on all available data and shows that the relative influence of posRec2 is 61% and of altruism2 is 20%. Together having an importance of greater than 80%. 
+```{r final model offer, message = FALSE}
+qualtricsOffer <- select(qualtrics, -c(public, respond, dilemma, chicken)) 
+
+set.seed(32)
+gbmFinal <- gbm(offer ~ ., data = qualtricsOffer, distribution = "gaussian", n.trees= 710, n.minobsinnode = 20)
+summary(gbmFinal)
+```
+
+When this variable is plotted in more detail, it shows a step-wise positive relationship with posRec2 and the amount offered. Altruism2 very quickly rises and then after a certain amount, approximately 10-40 dollars it stays fairly stable. So the higher amount of money donated to a good cause relates with higher offers up to a donation of 10-40 dollars, after this it has little explanatory value.
+```{r inspect plots offer}
+plot(gbmFinal, i = "posRec2", main = "Bivariate plot gbm")
+plot(gbmFinal, i = "altruism2", main = "Bivariate plot gbm")
+```
+
+## Respond
+First a subset of trainQualtrics is taken with only the minimum acceptable amount in the ultimatum game as dependent variable and the preferences, all the other games are excluded.
+```{r respond model, message = FALSE}
+trainRespond <- select(trainQualtrics, -c(public, offer, dilemma, chicken))
+attach(trainRespond)
+```
+
+### Bivariate analysis
+For the same reason as above Spearman's rang correlation is chosen and bivariate relationships.
+
+The following (absolute) correlations of greater than 0.10 are found:
+
+* Positive relationship with negRecPooled (0.29)
+* Negative relationship with posRec1 (-0.11).
+```{r bivariate respnd}
+plotCor(trainRespond)
+```
+
+### Base model
+A base model is conducted using the basemodelcv function. A cross-validated MSE score of 3.55, a standard deviation of 0.87 and a RMSE of 1.88 are found.
+```{r baseline respond}
+baseline <- baseModelcv(trainRespond, foldid)
+baseline
+mseBase <- baseline$meancv
+```
+
+### Best subset selection
+A best subset selection is performed. As the plot shows negRecPooled explains a more than 11% of all the variance of respond. By adding any other variables, little increase is gained.
+```{r bestsubset respond}
+bestRespond <- regsubsets(respond ~ ., data = trainRespond)
+plotR2Subs(bestRespond)
+```
+
+A best subset selection cross-validation is conducted using the bestsubsetcv function. The best performing model has one variable, as expected reviewing the R2 score above. The one variable model corresponds with a MSE of 3.18, a standard deviation of 0.45 and a RMSE of 1.78.
+```{r bestsubsetcv respond}
+bestSubs <- bestSubsetcv(trainRespond, foldid)
+bestSubs
+mseBestSub <- bestSubs$bestnmean
+plotModels(bestSubs$meancv, baseline)
+```
+
+The variable for the best subset model is negRecPooled, this confirms with the findings of the R2 plot and the bivariate analysis. The corresponding coefficient is 0.26, which shows a positive relation. This means that when people score 1 point higher on the negRecPooled scale, the minimum acceptable amount increases on average with 0.26. Furthermore the model and the posRec2 variable is strongly significant (<0.001)
+```{r coef respond}
+bestSubMdl <- respond ~ negRecPooled
+bestSubFit <- lm(bestSubMdl, data = trainPublic)
+summary(bestSubFit)
+plotBivariate(negRecPooled, respond)
+```
+
+### Lasso
+The lasso model is conducted. The best performing model has a lambda of 0.25 and a corresponding MSE of 3.30 and a RMSE of 1.81, which is worse than the best subset selection method. However, the standard deviation of 0.27 is somewhat lower and results are somewhat more stable. As the plot shows, the optimal lambda includes one variable, however the lambda plus 1 standard error corresponds with the base model, this shows that the difference isn't  very substantial.
+```{r lasso respond}
+lassocv <- cv.glmnet(trainPreferences, respond, alpha = 1, foldid = foldid)
+resultsLasso(lassocv)
+mseLasso <- min(lassocv$cvm)
+plot(lassocv)
+```
+
+The shrinkage plot shows the shrank coefficients. The plot shows that the best lambda includes one variable, posRec2. This was also found via best subset selection method. The coefficient corresponding with this penalty factor is 0.157.
+```{r shrinkage respond}
+plotShrinkage(trainPreferences, respond, lassocv)
+legend('topleft', legend = c("negRecPooled"), lwd = 2, col= c("black"))
+predict(lassocv, type = "coefficients", s = lassocv$lambda.min)
+```
+
+### Non-linearity
+Non-linear relations of the best subset model are examined. The residual plot shows strong non-linearity mostly prevalent in negRecPooled, this is confirmed by the p-value of adding an negRecPooled second degree term of 0.016.
+```{r non-linearity respond}
+residualPlots((bestSubFit),pch=19)
+```
+
+Therefore, models to the 4th degree are created. First a cross-validated nonlinear model is applied to test performance. However, the best performing model is the base model, unlike what the significance test shows, adding polynomials does not improve cross-validated MSE and increases the standard deviation strongly. Therefore, polynomials aren't added to the model.
+```{r non-linear cv respond}
+mdl2 <- respond ~ poly(negRecPooled, 2)
+mdl3 <- respond ~ poly(negRecPooled, 3)
+mdl4 <- respond ~ poly(negRecPooled, 4)
+models <- c(bestSubMdl, mdl2, mdl3, mdl4)
+
+polynomial <- nonLinearcv(trainRespond, foldid, models)
+polynomial
+msePoly <- polynomial$bestnmean
+
+plotModels(polynomial$meancv)
+```
+
+### Smoothing spline
+Next a smoothing spline is tried, to see whether this can capture the possible non-linear relationship. The best performing model is a smoothing spline with three degrees of freedom. The MSE is 3.13 which is lower than the best subset model which corresponds with 2 degrees of freedom. However, the standard deviation has increases as well.
+```{r smooth repsond}
+smoothSpline <- smoothSplinecv(trainRespond, foldid, "negRecPooled", maxdegree = 10)
+smoothSpline
+mseSmooth <- smoothSpline$bestnmean
+plotModels(smoothSpline$meancv, baseline, xlab = "degrees of freedom", axislabels = c("base", "bestsub", 3:10))
+```
+
+The best performing spline is constructed via a general additive model with a smoothing spline to third degree. It shows that negRecPooled with the smoothing spline is still significant. The bivariate plot includes the smoothing line in blue and it can be seen that it better fits respondents with higher negRecPooled scores, but might be slightly to wiggly before that.
+```{r gam}
+gam3 <- gam(respond ~ s(negRecPooled, 3))
+summary(gam3)
+preds <- predict(gam3, newdata = list(negRecPooled = 0:max(negRecPooled)))
+
+plotBivariate(negRecPooled, respond)
+lines(0:max(negRecPooled), preds, col = "blue", lwd = 2)
+```
+
+### Boosting
+The final model is boosting. First the parameters are set to train the model.
+```{r boosting respond}
+fitControl <- trainControl(method = "cv", number = 5)
+gbmGrid <-  expand.grid(interaction.depth = c(1, 2, 4, 8), n.trees = (1:10)*200, n.minobsinnode = 10, shrinkage = 0.001)
+```
+
+A MSE of 3.06, and a RMSE of 1.75 is found, which is lower than found in other simpler models. The optimal settings are 1400 trees, an interaction.depth of 1, n.minosinnode of 10 and a shrinkage factor of 0.001.
+```{r gbmfit respond}
+set.seed(64)
+gbmFit <- train(respond ~ ., data = trainRespond, method = "gbm", verbose = FALSE, trControl = fitControl, tuneGrid = gbmGrid, distribution = "gaussian")
+gbmFit
+plot(gbmFit)
+gbmFit$results[which.min(gbmFit$results$RMSE),1:6]
+mseBoost <- min(gbmFit$results$RMSE)^2
+mseBoost
+```
+
+The most important variable is the same found in all other methods negRecpooled, the second most important variable is risk2. The relative influence of negRecPooled is 77%, followed by risk2 with 10%.
+```{r gbm summar respond}
+set.seed(32)
+gbmBestFit <- gbm(respond ~ ., data = trainRespond, distribution = "gaussian", n.trees = 1400)
+summary(gbmBestFit)
+```
+
+### Final models
+The final models are inspected. As can be seen, the best performing model is the boosting method. The best subset selection improves with more than 10% compared to the base model. The Lasso method performs worse. Adding a polynomial to the best subset selection model was not helpful. However a smoothing spline to the third degree improved compared to the best subset selection with a small 2%, however the standard deviation increases too. The more complex boosting method decreased the MSE to 3.06 and decreased compared to the base model with more than 14%. The boosting method is chosen.
+```{r final models respond}
+finalModels <- data.frame(MSE = c(mseBase, mseBestSub, mseLasso, mseSmooth, mseBoost), row.names = c("Base", "BestSub", "Lasso", "Smooth", "Boost"))
+finalModels
+
+plotModels(finalModels$MSE, xlab = "Final models", axislabels = rownames(finalModels))
+```
+
+### Final predictions
+Now the final predictions on test set is performed. The model is already trained on all training data in the boosting section. The base model scores a MSE of 2.15 on the test set and a RMSE of 1.47. The best model performs better and has a MSE with 2.00 and a RMSE of 1.42. On the test set the final models performs 7% better than the base model, when measured in MSE.
+```{r final prediction respond}
+ytrue <- qualtrics[test, "respond"]
+baseMse <- mean((ytrue - mean(respond))^2)
+baseMse
+sqrt(baseMse)
+
+yhat <- predict(gbmBestFit, newdata = qualtrics[test,], n.trees = 1400)
+finalFit <- mean((ytrue - yhat)^2)
+finalFit
+sqrt(finalFit)
+```
+
+### Final model inspection
+The best final model, boosting is trained on all available data and shows that the relative influence of negRecPooled is 78% and of risk2 is 12%. Together having an importance of around 90%.
+```{r final full model respond, message = FALSE}
+qualtricsRespond <- select(qualtrics, -c(public, offer, dilemma, chicken)) 
+
+set.seed(32)
+gbmBest <- gbm(respond ~ ., data = qualtricsRespond, distribution = "gaussian", n.trees = 1400, interaction.depth = 1, shrinkage = 0.001)
+summary(gbmBest)
+```
+
+When these variables are plotted in more detail, it shows a positive relationship with negRecPooled and the minimum acceptable offer, but this only seems to increase very strongly after a score of 4 until 6. A score smaller than 4 scores stable, just as a score greater than 6. For risk2 almost the same pattern is found but here the increase starts slowly at 13, but very strongly at a score of 17 to 19, which approximately corresponds with accepting a sure payment of 165 to 185 instead of 50% chance of receiving 300. The minimum acceptable amount is thus higher for person that are risk-seeking, where risk-neutral corresponds 150 dollars. After and before this the minimum acceptable offer stays fairly stable.
+```{r final plots respond}
+plot(gbmBest, i = "negRecPooled", main = "Bivariate plot negRecPooled")
+plot(gbmBest, i = "risk2", main = "Bivariate plot gbm")
+```
+
+## Prisoner's dilemma
+First a subset of trainQualtrics is taken with only prisoner's dilemma as dependent variable and the preferences, all the other games are excluded. Furthermore a binary variable is made, where 0 corresponds with cooperate and 1 with defect. All models are, unlike the previous games, classification models.
+```{r dilemma model, message = FALSE}
+trainDilemma <- select(trainQualtrics, -c(chicken, offer, respond, public))
+attach(trainDilemma)
+dilemmaBinary <- ifelse(dilemma == "cooperate", 0, 1)
+```
+
+### Bivariate analysis
+The distributions are inspected via boxplots. The following main differences in distribution are found.
+
+* A negative relationship with posRec1
+* A negative relationship with posRec2
+* A negative relationship with altruism1
+* A negative relationship with altruism2
+* A negative relationship with trust
+
+Where a negative relationship corresponds with a distribution more tended to the lower spectrum for that preference for the defecting group, or the binary 1 compared to the cooperate group.
+```{r bivariate dilemma, message = FALSE}
+plotBoxes(trainQualtrics, dilemma)
+```
+
+### Base model
+A base model is conducted using the basemodelcv function, instead of using the mean as baseline it uses the majority class to predict, which in all cases is cooperate. The following accuracies are found, a mean cross-validation accuracy of 0.69 (69%) and a standard deviation of 0.10 (10%).
+```{r baseline dilemma}
+baseline <- baseModelcv(trainDilemma, foldid)
+baseline
+accBase <- baseline$meancv
+```
+
+### Best subset selection
+A best subset selection method is performed on the all trainings data and then cross-validation is used to chose the best model for every number of variables, this method uses a logistic regression. The best model contains 1 variable, altruism1. This variable correspond with the differences found in the bivariate analysis.
+```{r bestsubset dilemma}
+set.seed(32)
+bestDilemma <- bestglm(data.frame(trainPreferences, dilemmaBinary), IC = "CV", CVArgs = list(Method="HTF", K=5, REP=1), family=binomial)
+bestDilemma$Subsets
+```
+
+Next, since these cross-validation scores use different folds and are not comparable with the other models, the found best models are used as input for bestsubsetcv function and then a logistic regression is applied. The models are manually constructed. Using these foldid's, a different optimal model is found, the best performing model has three variables, altruism1, trust and negRecPooled. The first two corresponds with the findings of the bivariate analysis, the latter not. These variables correspond with a accuracy of 0.741 (74.1%) and a standard deviation of 0.12 (12%). 
+```{r bestsubsetcv dilemma}
+mdl1 <- dilemma ~ altruism1
+mdl2 <- dilemma ~ altruism1 + trust
+mdl3 <- dilemma ~ altruism1 + trust + negRecPooled
+mdl4 <- dilemma ~ altruism1 + trust + negRecPooled + posRec2
+mdl5 <- dilemma ~ altruism1 + trust + negRecPooled + posRec2 + altruism2
+mdl6 <- dilemma ~ altruism1 + trust + negRecPooled + posRec2 + altruism2 + risk2
+mdl7 <- dilemma ~ altruism1 + trust + negRecPooled + posRec2 + altruism2 + risk2 + risk1
+mdl8 <- dilemma ~ .
+models <- c(mdl1, mdl2, mdl3, mdl4, mdl5, mdl6, mdl7, mdl8)
+
+bestSubs <- bestSubsetcv(trainDilemma, foldid, models)
+bestSubs
+accBestSub <- bestSubs$bestnmean
+
+plotModels(bestSubs$meancv, baseline, classification = TRUE)
+```
+
+As mentioned before, the variables for the best model are altruism1, trust and negRecPooled. The AIC of the final model is 192.56. The corresponding Log coefficients are -0.278 for altruism1, -0.16 for trust and -0.152 for negRecPooled, these are all negative relationships. The first two were also found in the bivariate analysis. Altruism1 is very significant (0.001) and trust is moderately significant (0.03), negRecPooled is weakly significant with a p-value of (0.063). Since all variables are on the same scale the coefficients can be compared and show that altruism1 is the most important variable followed by trust and negRecPooled, which have about the same coefficients. 
+```{r coefficients dilemma}
+fit3 <- glm(dilemma ~ altruism1 + trust + negRecPooled, family = binomial)
+summary(fit3)
+```
+
+Next, the bivariate plots are inspected all show a negative relationship with dilemma. The lower the scores the more chance on defecting and vice versa. The strongest relation seem to be with altruism1, followed by trust and negRecPooled. These plots are Bivariate plots, so the true relationships in the model are different and a more complex combination of these.
+```{r plotBivariate dilemma}
+plotBivariate(altruism1, dilemmaBinary)
+plotBivariate(trust, dilemmaBinary)
+plotBivariate(negRecPooled, dilemmaBinary)
+```
+
+plotThreshold shows that  the threshold of 0.50 (50 %) corresponds with the maximum accuracy score, on average for all folds. However the F-score is suboptimal, so if a precision, recall or combination might be preferred, a lower threshold would improve performance. Furthermore, the ROC plot shows that the AUC is 0.67 poor to fair, but scores better than the random line of TP-rate and FP-rate of 0.5.
+```{r thresholds dilemma}
+plotThreshold(trainDilemma, foldid, mdl3)
+plotThreshold(trainDilemma, foldid, mdl3, "ROC")
+```
+
+### Lasso
+The lasso model is performed, using a logistic regression. The best performing model has a lambda of 0.21 and a corresponding accuracy of 0.73 (73%) and a standard deviation of 0.04 (4%). The accuracy is just slightly worse than best subset selection method, but the standard deviation of 0.04 is quite lower and has thus a lot more stable results. As the plot shows, the optimal lambda includes four variables, however the lambda plus 1 standard error corresponds with the base model, this shows that the difference isn't  very substantial.
+```{r lasso dilemma}
+lassocv <- cv.glmnet(trainPreferences, dilemma, alpha = 1, foldid = foldid,
+  family = "binomial", type.measure = "class")
+resultsLasso(lassocv, measure = "acc")
+accLasso <- 1 - min(lassocv$cvm)
+plot(lassocv)
+```
+
+The shrinkage plot shows the shrank coefficients for all variables. As the plot shows the best lambda includes altruism1, trust, negRecPooled and posRec2. All variables have negative coefficients. The first three variables were also found using the best subset selection method, but now posRec2 is included, for this variable a different distribution was found in the bivariate analysis. The Log coefficients that correspond with the optimal penalty factor can be found underneath. 
+```{r shrinkage dilemma}
+plotShrinkage(trainPreferences, dilemma, lassocv)
+legend('topleft', legend = c("posRec2", "negRecPooled", "trust", "altruism1"), 
+  lwd = 2, col= c("seagreen3", "black", "mediumorchid1", "blue2"))
+predict(lassocv, type = "coefficients", s = lassocv$lambda.min)
+```
+
+This next shrinkage plot shows the same coefficients but then on a scaled dataset. So the coefficients can be compared. As can be seen, altruism1 and trust have the highest coefficients, followed by negRecPooled and posRec2.
+```{r shrinkage scaled dilemma}
+plotShrinkage(trainPreferencesScaled, dilemma, lassocv)
+legend('topleft', legend = c("posRec2", "negRecPooled", "trust", "altruism1"), 
+  lwd = 2, col= c("seagreen3", "black", "mediumorchid1", "blue2"))
+```
+
+### Boosting
+The final model is boosting. First the parameters are set to train the model.
+```{r boost dilemma}
+fitControl <- trainControl(method = "cv", number = 5)
+gbmGrid <-  expand.grid(interaction.depth = c(1, 2, 4, 8), n.trees = (1:10)*600, n.minobsinnode = 20, shrinkage = 0.001)
+```
+
+After training an accuracy of 0.724 is found, which is worse than the previous models. The optimal settings are ntrees of 1800, interaction.depth of 4, n.minobsinnode of 20 and shrinkage factor of 0.001.
+```{r gbmfit dilemma}
+set.seed(64)
+gbmFit <- train(dilemma ~ ., data = trainDilemma, method = "gbm", verbose = FALSE, trControl = fitControl, tuneGrid = gbmGrid, distribution = "bernoulli")
+gbmFit
+plot(gbmFit)
+gbmFit$results[which.max(gbmFit$results$Accuracy),1:6]
+accBoost <- max(gbmFit$results$Accuracy)
+```
+
+The most important variable is altruism1 with 18%, followed by negRecPooled with 18% and risk2 with 16%. Followed by trust, altruism2 and posRec2 with respectively 13, 12 and 11%. Some of these effects might be caused due to interaction effects or confounding variables. The first two correspond with the best subset selection method, and trust with the fourth. There is no one strong influencer.
+```{r summary gmbfit dilemma}
+set.seed(32)
+gbmBestFit <- gbm(dilemmaBinary ~ . -dilemma, data = trainDilemma, n.trees = 1800, interaction.depth = 4, distribution = "bernoulli")
+summary(gbmBestFit)
+```
+
+### Final models
+The final models are inspected. As can be seen the best performing model is the best subset selection method. The best subset selection improves with almost 7% compared to the base model. The Lasso method performs just slightly less, and improves with 5% compared with the base model, but the standard deviation decreases quite strongly from 0.12 (12%) in the best subset selection method to 0.04 (4%). Therefore, a lasso model is a lot more stable. The more complex boosting model does not perform better than lasso. Because of the strong decrease in standard deviation and more stable results, the lasso model is preferred.
+```{r final models dilemma}
+finalModels <- data.frame(acc = c(accBase, accBestSub, accLasso, accBoost), row.names = c(c("Base", "BestSub", "Lasso", "Boost")))
+finalModels
+
+plotModels(finalModels$acc, xlab = "Final models", axislabels = rownames(finalModels), classification = TRUE)
+```
+
+### Final predictions
+Now the final predictions on test set is performed. The model is trained on all training data. The base model has an accuracy of 0.58 (58%) on the test set. The lasso model performs better and has an accuracy of 0.64 (64%). On the test set the final models performs 10% better compared to the base model and 6% in absolute percentage points.
+```{r final prediction dilemma}
+ytrue <- qualtrics[test, "dilemma"]
+
+majorityIndex <- which.max(table(trainDilemma$dilemma))
+majorityClass <- levels(trainDilemma$dilemma)[majorityIndex]
+sum(ytrue == majorityClass)/length(ytrue)
+
+finalFit <- glmnet(trainPreferences, dilemma, alpha = 1, family = "binomial", lambda =  lassocv$lambda.min)
+yhatProb <- predict(finalFit, s = lassocv$lambda.min,  newx = preferences[test,], type = "response")
+yhatClass <- ifelse(yhatProb < 0.5, "cooperate", "defect")
+sum(ytrue == yhatClass)/length(ytrue)
+```
+
+### Final model inspection
+As mentioned before, the variables for the best model are altruism1, trust and negRecPooled. The Lasso model explains 10% of the deviance and corresponds with 3 degrees of freedom, unlike as in the trainings model it does not contain posRec2, and only the three variables altruism1, trust and negRecPooled. Wherein, altruism1 and trust have almost equal coefficients with a Log coefficients of 0.164 and 0.163 respectively. negRecPooled has a Log coefficients of 0.038 and is almost 4 times smaller than the other variables. 
+```{r final dilemma set, message = FALSE}
+qualtricsDilemma <- select(qualtrics, -c(public, offer, respond, chicken)) 
+attach(qualtricsDilemma)
+
+finalFit <- glmnet(preferences, dilemma, alpha = 1, family = "binomial", lambda = lassocv$lambda.min)
+finalFit
+coef(finalFit)
+```
+
+## Chicken game
+First a subset of trainQualtrics is taken with only the chicken game as dependent variable and the preferences, all the other games are excluded. Furthermore a binary variable is made, where 0 corresponds with chicken and 1 with dare. The models are again, classifcation models.
+```{r chicken model, message = FALSE}
+trainChicken <- select(trainQualtrics, -c(dilemma, offer, respond, public))
+attach(trainChicken)
+chickenBinary <- ifelse(chicken == "chicken", 0, 1)
+```
+
+### Bivariate analysis
+The distributions are inspected via boxplots. The following main differences in distribution are found.
+
+* A positive relationship with negRecPooled
+* A negative relationship with posRec2
+* A negative relationship with altruism1
+* A negative relationship with altruism2
+* A negative relationship with trust
+
+Where a negative relationship corresponds with a distribution more tended to the lower spectrum for that preference for the defecting group, or the binary 1 compared to the cooperate group. Most of these differences correspond with prisoner's dilemma except for the somewhat small difference found in negRecPooled, and the small difference of distribution found posRec1 found in prisoner's dilemma, but not in the chicken game. The games do have a similar character, except of the more risky nature of the chicken game, however there was no difference found between the chicken and dare groups for risk.
+```{r bivariate chicken}
+plotBoxes(trainQualtrics, chicken)
+```
+
+### Base model
+A base model is conducted using the basemodelcv function. The following accuracies are found, a mean cross-validation accuracy of 0.73 (73%) and a standard deviation of 0.025 (2.5%).
+```{r basemodel chicken}
+baseline <- baseModelcv(trainChicken, foldid)
+baseline
+accBase <- baseline$meancv
+```
+
+### Best subset selection
+A best subset selection method is performed on the all trainings data and then cross-validation is used to chose the best model for every number of variables, this method uses a logistic regression. The best model contains no variables and is thus the same as the base model.
+```{r bestsubsetcv chicken}
+set.seed(32)
+bestChicken <- bestglm(data.frame(trainPreferences, chickenBinary), IC = "CV", CVArgs = list(Method="HTF", K=5, REP=1), family=binomial)
+bestChicken$Subsets
+```
+
+Next, since these cross-validation scores use different folds and are not comparable with the other models, the found best models are used as input for bestsubsetcv function. The models are manually constructed. Using these foldid's, a different optimal model is found, the best performing model has three variables, altruism2, trust and risk1 The first two corresponds with the findings of the bivariate analysis, the latter not. These variables correspond with a accuracy of 0.735 (73.5%) and a standard deviation of 0.02 (2%).This is just a very tiny improvement compared to the base model.
+```{r bestsubset models chicken}
+mdl1 <- chicken ~ altruism2
+mdl2 <- chicken ~ altruism2 + trust
+mdl3 <- chicken ~ altruism2 + trust + risk1
+mdl4 <- chicken ~ altruism2 + risk1 + altruism1 + posRec1
+mdl5 <- chicken ~ altruism2 + risk1 + altruism1 + posRec1 + trust
+mdl6 <- chicken ~ altruism2 + risk1 + altruism1 + posRec1 + trust + posRec2
+mdl7 <- chicken ~ altruism2 + risk1 + altruism1 + posRec1 + trust + posRec2 + risk2
+mdl8 <- chicken ~ .
+models <- c(mdl1, mdl2, mdl3, mdl4, mdl5, mdl6, mdl7, mdl8)
+
+bestSubs <- bestSubsetcv(trainChicken, foldid, models)
+bestSubs
+accBestSub <- bestSubs$bestnmean
+
+plotModels(bestSubs$meancv, baseline, classification = TRUE)
+```
+
+As mentioned before, the variables for the best model are altruism2, trust and risk2. The AIC of the final model is 197.63 The corresponding Log coefficients are -0.0026 for altruism2, -0.11 for trust and 0.12 for risk2, the first two have a negative relationships with chicken game, the latter a positive. Where the first two were also found in the bivariate analysis. Altruism2 is weakly significant (0.083), where trust (0.11) and negRecPooled (0.13) are not significant. Since the variable altruism2 is on a different scale, the standardized preferences are used to compare the coefficients, in this case altruism2 has Log coefficients of -0.41, trust of -0.29 and risk1 of 0.28.
+```{r fit chicken}
+fit3 <- glm(mdl3, trainDilemma, family = "binomial")
+summary(fit3)
+
+trainChickenScaled <- data.frame(chicken, trainPreferencesScaled)
+scaledFit3 <- glm(mdl3, trainChickenScaled, family = "binomial")
+coef(scaledFit3)
+```
+
+Next, the bivariate plots are inspected. The first two show a negative relationship with dilemma. The lower the scores the more chance on defecting and vice versa. Risk1 shows a positive relationship, the higher the risk score, the higher the chance of daring. The strongest relation seem to be with altruism2. These plots are bivariate plots, so the true relationships in the model are different and a more complex combination of these.
+```{r bivariate plots chicken}
+plotBivariate(altruism2, chickenBinary)
+plotBivariate(trust, chickenBinary)
+plotBivariate(risk1, chickenBinary)
+```
+
+plotThreshold shows that the threshold of 0.50 (50 %) corresponds, more or less with the maximum accuracy score for all folds, however the F-score is very suboptimal, so if a precision, recall or combination might be preferred a lower threshold would improve performance. For instance, a cut-off at around 0.3 would decrease accuracy slightly but would be near optimal for the F-score, so this might be the preferred cut-off point if the measured goal was more than accuracy. Furthermore, the ROC plot shows that the AUC is 0.612, which is a poor result, but scores better than the random line of TP-rate and FP-rate of 0.5. So it seems that some patterns are learned considering precision or recall, but not so much in accuracy.
+```{r threshold plots chicken}
+plotThreshold(trainChicken, foldid, mdl3)
+plotThreshold(trainChicken, foldid, mdl3, "ROC")
+```
+
+### Lasso
+The lasso model is performed. The best performing model has a lambda of 0.067 and a corresponding accuracy of 0.729 (72.9%) and a standard deviation of 0.011 (1.1%). The accuracy is equal to the base model, however the standard deviation has decreased. As the plot shows, the optimal lambda has zero variables included, corresponding with the base model, just as the first cross-validation of best subset selection.
+```{r lasso chicken}
+lassocv <- cv.glmnet(trainPreferences, chicken, alpha = 1, foldid = foldid, family = "binomial", type.measure = "class")
+resultsLasso(lassocv, measure = "acc")
+accLasso <- 1 - min(lassocv$cvm)
+plot(lassocv)
+```
+
+As can be seen the best lambda includes 0 variables, which is evidence for a weak model. 
+```{r shrinkage chicken}
+plotShrinkage(trainPreferences, chicken, lassocv)
+predict(lassocv, type = "coefficients", s = lassocv$lambda.min)
+```
+
+### Boosting
+The final model is boosting. First the parameters are set to train the model.
+```{r boosting chicken}
+fitControl <- trainControl(method = "cv", number = 5)
+gbmGrid <-  expand.grid(interaction.depth = c(1, 2, 4, 8), n.trees = (1:10)*200, n.minobsinnode = 10, shrinkage = c(0.001))
+```
+
+An accuracy of 0.729 (72.9%) is found, which is the same as the base model, the plot shows that nothing is learned and only worsens the model, so it seems like noise is learned.
+```{r gbmfit chicken}
+set.seed(64)
+gbmFit <- train(chicken ~ ., data = trainChicken, method = "gbm", verbose = FALSE, trControl = fitControl, tuneGrid = gbmGrid)
+gbmFit
+plot(gbmFit)
+gbmFit$results[which.max(gbmFit$results$Accuracy),1:6]
+accBoost <- max(gbmFit$results$Accuracy)
+```
+
+### Final models
+The final models are inspected. As can be seen the best performing model is the best subset selection method. All other methods do not perform better than the base model. The best subset selection method improves just a small 0.008 (0.8%). This shows that there is no strong evidence that this substantial better model than the base model and that it is a weak model.
+```{r final chicken}
+finalModels <- data.frame(acc = c(accBase, accBestSub, accLasso, accBoost), row.names = c(c("Base", "BestSub", "Lasso", "Boost")))
+finalModels
+
+plotModels(finalModels$acc, xlab = "Final models", axislabels = rownames(finalModels), classification = TRUE)
+```
+
+### Final predictions
+Now the final predictions on test set are performed. The model is trained on all training data. The base model has an accuracy of 0.706 (70.6%) on the test set. The lasso model performs better and has an accuracy of 0.735 (73.5%). The final models performs 4% better on the test set compared to the base model and 1.9% in absolute percentage points.
+```{r final pred chicken}
+ytrue <- qualtrics[test, "chicken"]
+
+majorityIndex <- which.max(table(trainChicken$chicken))
+majorityClass <- levels(trainChicken$chicken)[majorityIndex]
+sum(ytrue == majorityClass)/length(ytrue)
+
+finalFit <- glm(mdl3, trainChicken, family = "binomial")
+yhatProb <- predict(finalFit, qualtrics[test,], type = "response")
+yhatClass <- ifelse(yhatProb < 0.5, "chicken", "dare")
+sum(ytrue == yhatClass)/length(ytrue)
+```
+
+### Significance testing
+Models are created to check for significance from less complex to more complex on all data, thus including train and test set. Starting with bivariate analysis, using Wilcoxon rank test and a non-directional test with a p-value threshold of 0.10.  Wilcoxon rank test is chosen because most of these variables are asymmetric and mesokurtic or leptokurtic and this is a non-parametric method, which makes no assumptions based on normality and is less influenced by outliers. This shows a significant relation for altruism2 (0.02) and a weakly significant relation for trust (0.08), both variables were included in the final model. But these variables were not found using the lasso and in boosting. Risk1 is also insignificant (0.29).
+```{r significance chicken, message = FALSE}
+qualtricsChicken <- select(qualtrics, -c(dilemma, offer, respond, public)) 
+attach(qualtricsChicken)
+chickenBinary <- ifelse(chicken == "chicken", 0, 1)
+plotBoxes(qualtrics, chicken)
+apply(preferences, 2, function(x) wilcox.test(x ~ chicken))
+```
+
+Now, the multivariate models are examined. The model with one variable altruism2, shows no significant relation between altruism2. This might be caused because this test uses a parametric method, or simply because there is no strong relation.
+```{r final mdl chicken}
+mdl0 <- chicken ~ 1
+fit0 <- glm(mdl0, data = qualtricsChicken, family = binomial)
+
+mdl1 <- chicken ~ altruism2
+fit1 <- glm(mdl1, data = qualtricsChicken, family = binomial)
+summary(fit1)
+```
+
+Adding trust to this model is weakly significant with a p-value of 0.09.
+```{r final mdl2 chicken}
+mdl2 <- chicken ~ altruism2 + trust
+fit2 <- glm(mdl2, data = qualtricsChicken, family = binomial)
+summary(fit2)
+```
+
+The final model shows no significant relation for any variables, trust is no longer weakly significant (0.0132).
+```{r final best model chicken}
+finalModel <- chicken ~ altruism1 + trust + risk2
+finalFit <- glm(finalModel, data = qualtricsChicken, family = binomial)
+summary(finalFit)
+```
+
+Conducting an anova test confirms these findings and shows that adding altruism2 is insignificant, but adding trust to this model is weakly significant, adding risk2 actually lowers the AIC score. All in all, this shows that there is no strong relation between the variables and the choice made on the chicken game and that this is a weak model.
+```{r final chicken anova}
+anova(fit0, fit1, fit2, finalFit, test = "Chisq")
+```
+
+### Diagnostics of the model
+In this section the diagnostics of the models are tested and inspected. Beginning with a general overview plot of all the model.
+
+#### Non-linearity
+Next non-linearity is tested. There is some evidence of non-linearity on the end of the spectrum, however this seems to be mostly caused by the outliers, and there is no strong evidence that non-linearity would improve this model.
+```{r residual chicken}
+residualPlot(finalFit, pch = 19)
+```
+
+#### Correlation of error terms
+The second test is correlation of error terms, however no evidence for correlation of error-terms is found in a Durbin Watson test.
+```{r Durbin Watson chicken}
+durbinWatsonTest(finalFit)
+```
+
+#### High leverage points
+The high leverage plot gives no evidence for strong values.
+```{r hlev chicken}
+hlev <- hatvalues(finalFit)
+plot(hlev, pch = 19)
+```
+
+#### Collinearity
+The last diagnostic of collinearity, as observed above there is high collinearity between variables and this possibly influences the coefficients of the variables. However there is no evidence for multicollinearity as the VIF shows.
+```{r collinearity chicken}
+vif(finalFit)
+plotCor(data.frame(altruism2, trust, risk1))
+```
