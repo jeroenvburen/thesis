@@ -1,7 +1,7 @@
 Contains three datasets:
-* amazon: dataset with meta variables from amazon
-* qualtricsChar: dataset with variables as character variables
-* qualtricsNum: dataset with variables as numeric variables
+*amazon: dataset with meta variables from amazon
+*qualtricsChar: dataset with variables as character variables
+*qualtricsNum: dataset with variables as numeric variables
 
 # Manually corrected the following validation codes:
 129965998
