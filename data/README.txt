@@ -1,3 +1,8 @@
+Contains three datasets:
+* amazon: dataset with meta variables from amazon
+* qualtricsChar: dataset with variables as character variables
+* qualtricsNum: dataset with variables as numeric variables
+
 # Manually corrected the following validation codes:
 129965998
 822025531
@@ -8,6 +13,6 @@
 665464577
 474549492
 
-# To secure anonymity and privacy, removed columns extraMaterial, extraMail, feedback and copied valCode to another database.
+To secure anonymity and privacy, removed columns extraMaterial, extraMail, feedback and copied valCode to another database.
 
  
